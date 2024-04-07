@@ -107,10 +107,46 @@ void send_icmp_reply(char *buf, int interface, int len) {
 	send_to_link(interface, buf, len);
 }
 
-void manage_arp_packet(char *buf, int len, struct arp_table_entry *mac_table) {
+void send_arp_reply(char *buf, int len, struct arp_table_entry *mac_table, int interface) {
 	struct ether_header *eth_hdr = (struct ether_header *) buf;
-	struct arp_header *arp_hdr = (struct arp_header *)(buf + sizeof(struct ether_header))
+	struct arp_header *arp_hdr = (struct arp_header *)(buf + sizeof(struct ether_header));
+
+	uint8_t mac[6];
+	get_interface_mac(interface, mac);
+	memcpy(eth_hdr->ether_dhost, eth_hdr->ether_shost, 6);
+	memcpy(eth_hdr->ether_shost, mac, 6);
+
+	arp_hdr->op = htons(2);
+	uint32_t aux = arp_hdr->spa;
+	arp_hdr->spa = arp_hdr->tpa;
+	arp_hdr->tpa = aux;
+
+	memcpy(arp_hdr->tha, arp_hdr->sha, 6);
+	memcpy(arp_hdr->sha, mac, 6);
+
+	send_to_link(interface, buf, len);
 }
+
+void send_arp_request(struct route_table_entry *best_route) {
+	int len = sizeof(struct ether_header) + sizeof(struct arp_header);
+	char *buf = malloc(len);
+	struct ether_header *eth_hdr = (struct ether_header *) buf;
+	struct arp_header *arp_hdr = (struct arp_header *)(buf + sizeof(struct ether_header));
+
+	
+
+	send_to_link(best_route->interface, buf, len);
+}
+
+// void manage_arp_packet(char *buf, int len, struct arp_table_entry *mac_table, int interface) {
+// 	struct ether_header *eth_hdr = (struct ether_header *) buf;
+// 	struct arp_header *arp_hdr = (struct arp_header *)(buf + sizeof(struct ether_header));
+
+// 	if (arp_hdr->op == 1) {
+// 		send_arp_reply(buf, len, mac_table, interface);
+// 		return;
+// 	}
+// }
 
 int main(int argc, char *argv[])
 {
@@ -122,7 +158,9 @@ int main(int argc, char *argv[])
 	struct route_table_entry *rtable = malloc(sizeof(struct route_table_entry) * 80000);
 	struct arp_table_entry *mac_table = malloc(sizeof(struct arp_table_entry) * 20);
 	int rtable_len = read_rtable(argv[1], rtable);
-	int	mac_table_len = parse_arp_table("arp_table.txt", mac_table);
+	// int	mac_table_len = parse_arp_table("arp_table.txt", mac_table);
+	int mac_table_len = 0;
+	queue buf_queue = queue_create();
 
 	qsort(rtable, rtable_len, sizeof(struct route_table_entry), compare);
 
@@ -133,16 +171,20 @@ int main(int argc, char *argv[])
 
 		interface = recv_from_any_link(buf, &len);
 		DIE(interface < 0, "recv_from_any_links");
-		printf("Mi a dat pachet\n");
+		// printf("Mi a dat pachet\n");
 
 
 		struct ether_header *eth_hdr = (struct ether_header *) buf;
+		struct arp_header *arp_hdr = (struct arp_header *)(buf + sizeof(struct ether_header));
+
 		/* Note that packets received are in network order,
 		any header field which has more than 1 byte will need to be conerted to
 		host order. For example, ntohs(eth_hdr->ether_type). The oposite is needed when
 		sending a packet on the link, */
-		if (eth_hdr->ether_type != ntohs(ETHERTYPE_ARP)) {
-			manage_arp_packet(buf, len, mac_table);
+		
+		if (eth_hdr->ether_type == htons(ETHERTYPE_ARP) && ntohs(arp_hdr->op) == 1) {
+			printf("Am primit ARP\n");
+			send_arp_reply(buf, len, mac_table, interface);
 			continue;
 		}
 
@@ -181,6 +223,14 @@ int main(int argc, char *argv[])
 		uint8_t mac[6];
 		get_interface_mac(best_route->interface, mac);
 		struct arp_table_entry *destmac = get_mac_entry(best_route->next_hop, mac_table, mac_table_len);
+
+		if (destmac == NULL) {
+			char *aux_buf = malloc(len * sizeof(char));
+			queue_enq(buf_queue, aux_buf);
+			send_arp_request(best_route);
+			continue;
+		}
+
 		for (int i = 0; i < 6; i++) {
 			eth_hdr->ether_dhost[i] = destmac->mac[i];
 			eth_hdr->ether_shost[i] = mac[i];
