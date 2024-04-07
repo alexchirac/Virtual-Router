@@ -127,26 +127,50 @@ void send_arp_reply(char *buf, int len, struct arp_table_entry *mac_table, int i
 	send_to_link(interface, buf, len);
 }
 
-void send_arp_request(struct route_table_entry *best_route) {
+void send_arp_request(struct route_table_entry *best_route, int interface) {
 	int len = sizeof(struct ether_header) + sizeof(struct arp_header);
 	char *buf = malloc(len);
 	struct ether_header *eth_hdr = (struct ether_header *) buf;
 	struct arp_header *arp_hdr = (struct arp_header *)(buf + sizeof(struct ether_header));
 
-	
+	char *alpha_mac = "ff:ff:ff:ff:ff:ff";
+	hwaddr_aton(alpha_mac, eth_hdr->ether_dhost);
+	get_interface_mac(interface, eth_hdr->ether_shost);
+	eth_hdr->ether_type = htons(ETHERTYPE_ARP);
+
+	arp_hdr->htype = htons(1);
+	arp_hdr->ptype = htons(ETHERTYPE_IP);
+	arp_hdr->hlen = 6;
+	arp_hdr->plen = 4;
+	arp_hdr->op = htons(1);
+	arp_hdr->spa = inet_addr(get_interface_ip(interface));
+	arp_hdr->tpa = best_route->next_hop;
+	get_interface_mac(interface, arp_hdr->sha);
+	hwaddr_aton(alpha_mac, arp_hdr->tha);
 
 	send_to_link(best_route->interface, buf, len);
 }
 
-// void manage_arp_packet(char *buf, int len, struct arp_table_entry *mac_table, int interface) {
-// 	struct ether_header *eth_hdr = (struct ether_header *) buf;
-// 	struct arp_header *arp_hdr = (struct arp_header *)(buf + sizeof(struct ether_header));
+void send_queue_start(queue *buf_queue, char *arp_packet, struct arp_table_entry *mac_table, int *mac_table_len) {
+	void *elem = queue_deq(*buf_queue);
+	size_t *len = (size_t *)elem;
+	int *interface = (int *)((char *)elem + sizeof(size_t));
+	char *send_buf =  ((char *)elem + sizeof(size_t) + sizeof(int));
 
-// 	if (arp_hdr->op == 1) {
-// 		send_arp_reply(buf, len, mac_table, interface);
-// 		return;
-// 	}
-// }
+	struct ether_header *send_eth_hdr = (struct ether_header *) send_buf;
+	struct ether_header *arp_eth_hdr = (struct ether_header *) arp_packet;
+	struct arp_header *arp_hdr = (struct arp_header *)(send_buf + sizeof(struct ether_header));
+
+	struct arp_table_entry new_entry;
+	new_entry.ip = arp_hdr->spa;
+	memcpy(new_entry.mac, arp_hdr->sha, 6);
+	mac_table[(*mac_table_len)] = new_entry;
+	(*mac_table_len) = (*mac_table_len) + 1;
+
+	memcpy(send_eth_hdr->ether_dhost, arp_hdr->sha, 6);
+
+	send_to_link(*interface, send_buf, *len);
+}
 
 int main(int argc, char *argv[])
 {
@@ -158,7 +182,6 @@ int main(int argc, char *argv[])
 	struct route_table_entry *rtable = malloc(sizeof(struct route_table_entry) * 80000);
 	struct arp_table_entry *mac_table = malloc(sizeof(struct arp_table_entry) * 20);
 	int rtable_len = read_rtable(argv[1], rtable);
-	// int	mac_table_len = parse_arp_table("arp_table.txt", mac_table);
 	int mac_table_len = 0;
 	queue buf_queue = queue_create();
 
@@ -171,7 +194,6 @@ int main(int argc, char *argv[])
 
 		interface = recv_from_any_link(buf, &len);
 		DIE(interface < 0, "recv_from_any_links");
-		// printf("Mi a dat pachet\n");
 
 
 		struct ether_header *eth_hdr = (struct ether_header *) buf;
@@ -185,6 +207,11 @@ int main(int argc, char *argv[])
 		if (eth_hdr->ether_type == htons(ETHERTYPE_ARP) && ntohs(arp_hdr->op) == 1) {
 			printf("Am primit ARP\n");
 			send_arp_reply(buf, len, mac_table, interface);
+			continue;
+		}
+
+		if (eth_hdr->ether_type == htons(ETHERTYPE_ARP) && ntohs(arp_hdr->op) == 2) {
+			send_queue_start(&buf_queue, buf, mac_table, &mac_table_len);
 			continue;
 		}
 
@@ -222,18 +249,23 @@ int main(int argc, char *argv[])
 
 		uint8_t mac[6];
 		get_interface_mac(best_route->interface, mac);
+		memcpy(eth_hdr->ether_shost, mac, 6);
+
 		struct arp_table_entry *destmac = get_mac_entry(best_route->next_hop, mac_table, mac_table_len);
 
 		if (destmac == NULL) {
-			char *aux_buf = malloc(len * sizeof(char));
+			char *aux_buf = malloc(len * sizeof(char) + sizeof(int) + sizeof(size_t));
+			memcpy(aux_buf + sizeof(int) + sizeof(size_t), buf, len);
+			memcpy(aux_buf, &len, sizeof(size_t));
+			memcpy(aux_buf + sizeof(size_t), &(best_route->interface), sizeof(int));
+
 			queue_enq(buf_queue, aux_buf);
-			send_arp_request(best_route);
+			send_arp_request(best_route, interface);
 			continue;
 		}
 
 		for (int i = 0; i < 6; i++) {
 			eth_hdr->ether_dhost[i] = destmac->mac[i];
-			eth_hdr->ether_shost[i] = mac[i];
 		}
 		send_to_link(best_route->interface, buf, len);
 	}
